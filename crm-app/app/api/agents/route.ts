@@ -61,9 +61,10 @@ export async function GET(req: NextRequest) {
 }
 
 const createAgentSchema = z.object({
-  name: z.string().min(2),
-  enterpriseName: z.string().min(1, "Enterprise Name is required"),
-  mobile: z.string().min(10).max(15),
+  name: z.string().trim().min(2),
+  // Mandatory — whitespace-only does not count.
+  enterpriseName: z.string().trim().min(1, "Enterprise Name is required"),
+  mobile: z.string().trim().min(10).max(15),
   altMobile: z.string().optional(),
   email: z.string().email().optional().or(z.literal("")),
   address: z.string().optional(),
@@ -72,7 +73,7 @@ const createAgentSchema = z.object({
   notes: z.string().optional(),
   // Optional: create a portal login for this agent at the same time.
   createLogin: z.boolean().optional(),
-  loginId: z.string().min(3).optional(),
+  loginId: z.string().trim().toLowerCase().min(3).optional(),
   password: z.string().min(6).optional(),
 });
 
@@ -103,46 +104,85 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const existingUser = await prisma.user.findUnique({ where: { email: data.loginId } });
+    // Login IDs are shared with Manager/Employee logins; compare
+    // case-insensitively so "Rahul01" and "rahul01" can't both exist.
+    const existingUser = await prisma.user.findFirst({
+      where: { email: { equals: data.loginId, mode: "insensitive" } },
+      select: { id: true },
+    });
     if (existingUser) {
       return NextResponse.json({ error: "That login ID is already in use" }, { status: 409 });
     }
   }
 
-  const agentCode = await nextAgentCode();
+  // Duplicate agent registration: the same mobile number must not be
+  // registered twice (agents that were deleted don't count).
+  const duplicateAgent = await prisma.agent.findFirst({
+    where: { mobile: data.mobile, deletedAt: null },
+    select: { agentCode: true, name: true },
+  });
+  if (duplicateAgent) {
+    return NextResponse.json(
+      { error: `An agent with this mobile number already exists (${duplicateAgent.agentCode} — ${duplicateAgent.name})` },
+      { status: 409 }
+    );
+  }
 
-  const agent = await prisma.$transaction(async (tx) => {
-    let newUserId: string | undefined;
-    if (data.createLogin && data.loginId && data.password) {
-      const passwordHash = await bcrypt.hash(data.password, 10);
-      const newUser = await tx.user.create({
+  const passwordHash = data.createLogin && data.password ? await bcrypt.hash(data.password, 10) : null;
+
+  // The agent code is generated just before the insert; if two agents
+  // are created at the same instant and collide, the unique constraint
+  // rejects the loser and we simply take the next free code.
+  let agent: Awaited<ReturnType<typeof createAgentOnce>> | null = null;
+  for (let attempt = 0; attempt < 3 && !agent; attempt++) {
+    try {
+      agent = await createAgentOnce(await nextAgentCode());
+    } catch (e: any) {
+      const target = String(e?.meta?.target ?? "");
+      if (e?.code === "P2002" && target.includes("agentCode") && attempt < 2) continue;
+      if (e?.code === "P2002" && target.includes("email")) {
+        return NextResponse.json({ error: "That login ID is already in use" }, { status: 409 });
+      }
+      throw e;
+    }
+  }
+  if (!agent) return NextResponse.json({ error: "Could not allocate an agent ID. Please try again." }, { status: 500 });
+
+  function createAgentOnce(agentCode: string) {
+    // Agent profile + (optional) login are created together, linked 1:1
+    // through Agent.userId — all or nothing.
+    return prisma.$transaction(async (tx) => {
+      let newUserId: string | undefined;
+      if (data.createLogin && data.loginId && passwordHash) {
+        const newUser = await tx.user.create({
+          data: {
+            name: data.name,
+            email: data.loginId,
+            passwordHash,
+            role: "AGENT",
+          },
+        });
+        newUserId = newUser.id;
+      }
+
+      return tx.agent.create({
         data: {
+          agentCode,
           name: data.name,
-          email: data.loginId,
-          passwordHash,
-          role: "AGENT",
+          enterpriseName: data.enterpriseName,
+          mobile: data.mobile,
+          altMobile: data.altMobile || null,
+          email: data.email || null,
+          address: data.address || null,
+          city: data.city || null,
+          state: data.state || null,
+          notes: data.notes || null,
+          createdById: userId,
+          userId: newUserId,
         },
       });
-      newUserId = newUser.id;
-    }
-
-    return tx.agent.create({
-      data: {
-        agentCode,
-        name: data.name,
-        enterpriseName: data.enterpriseName,
-        mobile: data.mobile,
-        altMobile: data.altMobile || null,
-        email: data.email || null,
-        address: data.address || null,
-        city: data.city || null,
-        state: data.state || null,
-        notes: data.notes || null,
-        createdById: userId,
-        userId: newUserId,
-      },
     });
-  });
+  }
 
   await logActivity({
     userId,

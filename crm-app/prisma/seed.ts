@@ -1,10 +1,16 @@
 import { PrismaClient } from "@prisma/client";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
+import { DEFAULT_TEMPLATES, SHARED_TEMPLATE_TYPES, DEFAULT_STATUS_TEMPLATES, SERVICE_STATUSES } from "../lib/whatsapp/defaultTemplates";
 
 const prisma = new PrismaClient();
 
 async function main() {
-  const passwordHash = await bcrypt.hash("ChangeMe123!", 10);
+  // No hard-coded shared password any more: use SEED_PASSWORD if you set
+  // one, otherwise a random one is generated and printed ONCE at the end.
+  const seedPassword = process.env.SEED_PASSWORD || crypto.randomBytes(9).toString("base64url") + "1a";
+  const passwordWasGenerated = !process.env.SEED_PASSWORD;
+  const passwordHash = await bcrypt.hash(seedPassword, 10);
 
   const admin = await prisma.user.upsert({
     where: { email: "admin@example.com" },
@@ -17,6 +23,22 @@ async function main() {
     update: {},
     create: { name: "Amit (Employee)", email: "employee@example.com", passwordHash, role: "EMPLOYEE" },
   });
+
+  // Employees get an auto-generated EMP- ID (same counter the Users page
+  // uses). The migration backfills existing employees; this covers a
+  // freshly seeded database.
+  if (!employee.employeeCode) {
+    await prisma.$transaction(async (tx) => {
+      const rows = await tx.$queryRaw<{ value: number }[]>`
+        INSERT INTO "Counter" ("key", "value", "updatedAt") VALUES ('EMPLOYEE', 1, NOW())
+        ON CONFLICT ("key") DO UPDATE SET "value" = "Counter"."value" + 1, "updatedAt" = NOW()
+        RETURNING "value"`;
+      await tx.user.update({
+        where: { id: employee.id },
+        data: { employeeCode: `EMP-${String(Number(rows[0].value)).padStart(6, "0")}` },
+      });
+    });
+  }
 
   await prisma.user.upsert({
     where: { email: "manager@example.com" },
@@ -98,6 +120,25 @@ async function main() {
     create: { serviceId: panCard.id, name: "Photo", required: false, sortOrder: 1 },
   });
 
+  // Dynamic field demonstrating the Agent / Non-Agent visibility
+  // split: this only shows up when an Agent applies (e.g. an
+  // internal enrollment code agents use but walk-in staff don't need).
+  await prisma.serviceField.upsert({
+    where: { serviceId_name: { serviceId: panCard.id, name: "agent_enrollment_code" } },
+    update: {},
+    create: {
+      serviceId: panCard.id,
+      name: "agent_enrollment_code",
+      label: "Agent Enrollment Code",
+      fieldType: "TEXT",
+      requiredAtSubmission: false,
+      visibleToAgent: true,
+      visibleToEmployee: false,
+      visibleToAdmin: false,
+      sortOrder: 1,
+    },
+  });
+
   // Dynamic field — Aadhaar Update needs the old Aadhaar number at
   // submission time, and can record the "updated" confirmation number
   // later (not required up front, added by staff once available).
@@ -130,11 +171,12 @@ async function main() {
 
   const customer = await prisma.customer.upsert({
     where: { customerCode: "CUS-000001" },
-    update: {},
+    update: { mobileIsWhatsapp: true },
     create: {
       customerCode: "CUS-000001",
       fullName: "Rahul Sharma",
       mobile: "9876543210",
+      mobileIsWhatsapp: true, // demonstrates the WhatsApp notifications end-to-end
       district: "Pune",
       state: "Maharashtra",
       createdById: admin.id,
@@ -144,10 +186,10 @@ async function main() {
   // Birth Certificate via Agent Rahul — agent price ₹350, fully paid
   // (already reconciled from a past approved payment).
   await prisma.customerService.upsert({
-    where: { workCode: "WRK-000001" },
+    where: { workCode: "SID-000001" },
     update: {},
     create: {
-      workCode: "WRK-000001",
+      workCode: "SID-000001",
       customerId: customer.id,
       serviceId: services[0].id, // Birth Certificate
       agentId: agent.id,
@@ -165,10 +207,10 @@ async function main() {
   // (plus the one below) makes up the agent's current pending
   // balance, which the seeded payment request below is against.
   await prisma.customerService.upsert({
-    where: { workCode: "WRK-000002" },
+    where: { workCode: "SID-000002" },
     update: {},
     create: {
-      workCode: "WRK-000002",
+      workCode: "SID-000002",
       customerId: customer.id,
       serviceId: services[1].id, // PAN Card
       agentId: agent.id,
@@ -184,10 +226,10 @@ async function main() {
 
   // Aadhaar Update via Agent Rahul — agent price ₹150, also unpaid.
   await prisma.customerService.upsert({
-    where: { workCode: "WRK-000004" },
+    where: { workCode: "SID-000004" },
     update: {},
     create: {
-      workCode: "WRK-000004",
+      workCode: "SID-000004",
       customerId: customer.id,
       serviceId: services[3].id, // Aadhaar Update
       agentId: agent.id,
@@ -205,10 +247,10 @@ async function main() {
   // customer price ₹400, unassigned — shows up in the Admin/Manager
   // "Unassigned Queue" on the dashboard.
   await prisma.customerService.upsert({
-    where: { workCode: "WRK-000003" },
+    where: { workCode: "SID-000003" },
     update: {},
     create: {
-      workCode: "WRK-000003",
+      workCode: "SID-000003",
       customerId: customer.id,
       serviceId: services[2].id, // Income Certificate
       status: "NEW",
@@ -244,10 +286,10 @@ async function main() {
   // awaiting employee accept/reject — shows on the org-wide "Pending
   // Review" queue and does NOT count toward his balance yet.
   const pendingReviewApp = await prisma.customerService.upsert({
-    where: { workCode: "WRK-000005" },
+    where: { workCode: "SID-000005" },
     update: {},
     create: {
-      workCode: "WRK-000005",
+      workCode: "SID-000005",
       customerId: customer.id,
       serviceId: panCard.id,
       agentId: agent.id,
@@ -272,10 +314,10 @@ async function main() {
   // An application that was already rejected, so you can try the
   // resubmit/cancel flow from the agent side immediately.
   const rejectedApp = await prisma.customerService.upsert({
-    where: { workCode: "WRK-000006" },
+    where: { workCode: "SID-000006" },
     update: {},
     create: {
-      workCode: "WRK-000006",
+      workCode: "SID-000006",
       customerId: customer.id,
       serviceId: aadhaarUpdate.id,
       agentId: agent.id,
@@ -302,9 +344,45 @@ async function main() {
   });
 
 
+  // WhatsApp: starts NOT_CONNECTED — an authorized non-Agent user
+  // must scan a QR from the WhatsApp Configuration page to actually
+  // connect it. This just ensures the config row exists so the
+  // status page has something to read on first load.
+  const existingWaConfig = await prisma.whatsAppConfig.findFirst();
+  if (!existingWaConfig) {
+    await prisma.whatsAppConfig.create({ data: { status: "NOT_CONNECTED" } });
+  }
+
+  // Default shared templates — defined once in
+  // lib/whatsapp/defaultTemplates.ts (the sender also falls back to them
+  // when a row doesn't exist yet). Admin/Manager/Employee can edit any of
+  // these from WhatsApp Configuration; there is exactly one row per type,
+  // never one per agent/customer/employee.
+  for (const type of SHARED_TEMPLATE_TYPES) {
+    await prisma.whatsAppTemplate.upsert({
+      where: { type },
+      update: {},
+      create: { type, body: DEFAULT_TEMPLATES[type], updatedById: admin.id },
+    });
+  }
+
+  // One customer "status changed" template per application status.
+  for (const status of SERVICE_STATUSES) {
+    const def = DEFAULT_STATUS_TEMPLATES[status];
+    await prisma.whatsAppStatusTemplate.upsert({
+      where: { status },
+      update: {},
+      create: { status, body: def.body, isEnabled: def.enabled, updatedById: admin.id },
+    });
+  }
+
   console.log("Seed complete.");
-  console.log("Admin/Manager/Employee login: admin@example.com / manager@example.com / employee@example.com — password ChangeMe123!");
-  console.log("Agent portal login: rahul01 — password ChangeMe123!");
+  console.log("Seeded logins: admin@example.com / manager@example.com / employee@example.com, and agent portal login rahul01.");
+  if (passwordWasGenerated) {
+    console.log("Generated password for all seeded logins (shown once — change it after first login):", seedPassword);
+  } else {
+    console.log("Seeded logins use the password from SEED_PASSWORD.");
+  }
 }
 
 main()

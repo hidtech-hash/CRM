@@ -1,16 +1,18 @@
 import { NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
 import { authOptions, isAgentRole } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
-import { getAgentForUser, getAgentBalance } from "@/lib/agentContext";
-import { generateUpiQrDataUrl } from "@/lib/upi";
+import { getAgentForUser } from "@/lib/agentContext";
+import { generateAgentPendingPaymentUPILink } from "@/lib/upi";
+import QRCode from "qrcode";
 
 // GET /api/agent-portal/qr
-// AGENT role only. Generates a UPI QR for this agent's CURRENT
-// pending amount, computed fresh on the server every time this is
-// called — the agent cannot influence the amount encoded in the QR
-// in any way (there is no request body, no query param it reads for
-// amount). If pending is 0, no QR is generated.
+// AGENT role only. Generates a UPI QR (and the raw deep-link URI, for
+// the "Pay Through UPI App" button) for this agent's CURRENT pending
+// amount, computed fresh on the server every time this is called —
+// the agent cannot influence the amount in any way. Uses
+// generateAgentPendingPaymentUPILink (lib/upi.ts) — the SAME function
+// the WhatsApp Agent Payment Reminder uses, so the two can never
+// disagree about the link. If pending is 0, no QR/link is generated.
 export async function GET() {
   const session = await getServerSession(authOptions);
   const role = (session?.user as any)?.role;
@@ -23,27 +25,16 @@ export async function GET() {
     return NextResponse.json({ error: "No agent profile is linked to this login" }, { status: 404 });
   }
 
-  const balance = await getAgentBalance(agent.id);
-
-  if (balance.pending <= 0) {
-    return NextResponse.json({ pending: 0, qr: null });
+  const link = await generateAgentPendingPaymentUPILink(agent);
+  if (link.pending <= 0) {
+    return NextResponse.json({ pending: 0, qr: null, uri: null });
+  }
+  if (!link.uri) {
+    // Pending amount exists, but no UPI has been configured yet —
+    // distinct from "no pending" so the UI can say so specifically.
+    return NextResponse.json({ pending: link.pending, qr: null, uri: null, error: "UPI not configured yet" });
   }
 
-  const config = await prisma.upiConfig.findFirst({ where: { isActive: true }, orderBy: { updatedAt: "desc" } });
-  if (!config) {
-    return NextResponse.json({ pending: balance.pending, qr: null, error: "UPI not configured yet" });
-  }
-
-  const { uri, dataUrl } = await generateUpiQrDataUrl({
-    upiId: config.upiId,
-    payeeName: config.payeeName,
-    amount: balance.pending,
-    note: `${agent.agentCode} pending payment`,
-  });
-
-  // `uri` (the raw upi://pay?... deep link) is what the "Pay Through
-  // UPI App" button uses to open the agent's installed UPI app
-  // directly — same server-computed amount as the QR, so there's no
-  // separate path for the agent to influence what gets pre-filled.
-  return NextResponse.json({ pending: balance.pending, qr: dataUrl, uri });
+  const dataUrl = await QRCode.toDataURL(link.uri, { width: 320, margin: 1 });
+  return NextResponse.json({ pending: link.pending, qr: dataUrl, uri: link.uri });
 }

@@ -60,6 +60,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Payment screenshot is required" }, { status: 400 });
   }
 
+  // The same UTR must never be credited twice (by this agent or any
+  // other): refuse a UTR that already has a pending or approved request.
+  const duplicate = await prisma.agentPaymentRequest.findFirst({
+    where: {
+      utrNumber: { equals: utrNumber, mode: "insensitive" },
+      status: { in: ["PENDING_VERIFICATION", "APPROVED"] },
+    },
+    select: { id: true },
+  });
+  if (duplicate) {
+    return NextResponse.json(
+      { error: "This UTR / transaction reference has already been submitted." },
+      { status: 409 }
+    );
+  }
+
   const saved = await savePaymentScreenshot(screenshot);
   if ("error" in saved) {
     return NextResponse.json({ error: saved.error }, { status: 400 });

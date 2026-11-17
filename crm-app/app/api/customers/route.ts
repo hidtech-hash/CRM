@@ -4,7 +4,8 @@ import { authOptions, canCreateCustomer } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { nextCustomerCode } from "@/lib/codes";
 import { logActivity } from "@/lib/activityLog";
-import { z } from "zod";
+import { sendWhatsAppMessage, resolveCustomerWhatsAppNumber } from "@/lib/whatsapp/service";
+import { customerCreateSchema, customerDataForCreate } from "@/lib/validation/customer";
 
 // GET /api/customers?search=rahul&page=1
 // Searches by name, mobile, or customer code — used by the
@@ -15,7 +16,7 @@ export async function GET(req: NextRequest) {
 
   const { searchParams } = new URL(req.url);
   const search = searchParams.get("search")?.trim() ?? "";
-  const page = Number(searchParams.get("page") ?? "1");
+  const page = Math.max(1, Math.floor(Number(searchParams.get("page") ?? "1")) || 1);
   const pageSize = 20;
 
   const where = {
@@ -47,22 +48,6 @@ export async function GET(req: NextRequest) {
   return NextResponse.json({ customers, total, page, pageSize });
 }
 
-const createCustomerSchema = z.object({
-  fullName: z.string().min(2),
-  mobile: z.string().min(10).max(15),
-  altMobile: z.string().optional(),
-  email: z.string().email().optional().or(z.literal("")),
-  address: z.string().optional(),
-  village: z.string().optional(),
-  tehsil: z.string().optional(),
-  district: z.string().optional(),
-  state: z.string().optional(),
-  pincode: z.string().optional(),
-  dob: z.string().optional(), // ISO date string from the form
-  gender: z.string().optional(),
-  notes: z.string().optional(),
-});
-
 // POST /api/customers
 // Creates a customer. Checks for a likely duplicate by mobile
 // number first and returns it instead of silently creating a
@@ -76,7 +61,7 @@ export async function POST(req: NextRequest) {
   }
 
   const body = await req.json();
-  const parsed = createCustomerSchema.safeParse(body);
+  const parsed = customerCreateSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
@@ -107,23 +92,7 @@ export async function POST(req: NextRequest) {
   const userId = (session.user as any).id as string;
 
   const customer = await prisma.customer.create({
-    data: {
-      customerCode,
-      fullName: data.fullName,
-      mobile: data.mobile,
-      altMobile: data.altMobile || null,
-      email: data.email || null,
-      address: data.address || null,
-      village: data.village || null,
-      tehsil: data.tehsil || null,
-      district: data.district || null,
-      state: data.state || null,
-      pincode: data.pincode || null,
-      dob: data.dob ? new Date(data.dob) : null,
-      gender: data.gender || null,
-      notes: data.notes || null,
-      createdById: userId,
-    },
+    data: { customerCode, ...(customerDataForCreate(data) as any), createdById: userId },
   });
 
   await logActivity({
@@ -133,6 +102,27 @@ export async function POST(req: NextRequest) {
     entityId: customer.id,
     newValue: { customerCode: customer.customerCode, fullName: customer.fullName },
   });
+
+  // Fire-and-forget: WhatsApp must never add latency to, or block,
+  // customer creation — the customer record is already fully
+  // created and the response below returns regardless of what
+  // happens to this notification (see lib/whatsapp/service.ts,
+  // which never throws and always logs its own result).
+  const waNumber = resolveCustomerWhatsAppNumber(customer);
+  if (waNumber) {
+    console.log(`[WhatsApp] Customer created notification triggered for ${customer.customerCode}`);
+    sendWhatsAppMessage({
+      templateType: "CUSTOMER_CREATED",
+      recipientType: "CUSTOMER",
+      toNumberRaw: waNumber,
+      customerId: customer.id,
+      variables: { CUSTOMER_NAME: customer.fullName, CUSTOMER_ID: customer.customerCode },
+    }).catch((e) => console.error("[WhatsApp] Unexpected error sending customer-created notification:", e?.message));
+  } else {
+    console.log(
+      `[WhatsApp] Skipping customer created notification for ${customer.customerCode} — no number marked as WhatsApp`
+    );
+  }
 
   return NextResponse.json({ customer }, { status: 201 });
 }

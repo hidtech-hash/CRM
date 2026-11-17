@@ -4,6 +4,7 @@ import { authOptions, canManageServices } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { listActiveServices, listAllServices } from "@/lib/services";
 import { z } from "zod";
+import { prismaErrorResponse } from "@/lib/apiErrors";
 
 // GET /api/services
 // By default returns only active services (used to populate the
@@ -48,15 +49,21 @@ export async function POST(req: NextRequest) {
   }
   const data = parsed.data;
 
-  const service = await prisma.service.create({
-    data: {
-      name: data.name,
-      code: data.code.toUpperCase().replace(/\s+/g, "_"),
-      description: data.description || null,
-      customerPrice: data.customerPrice,
-      agentPrice: data.agentPrice,
-    },
-  });
-
-  return NextResponse.json({ service }, { status: 201 });
+  try {
+    const service = await prisma.service.create({
+      data: {
+        name: data.name,
+        code: data.code.toUpperCase().replace(/\s+/g, "_"),
+        description: data.description || null,
+        customerPrice: data.customerPrice,
+        agentPrice: data.agentPrice,
+      },
+    });
+    return NextResponse.json({ service }, { status: 201 });
+  } catch (e: any) {
+    if (e?.code === "P2002") {
+      return NextResponse.json({ error: "A service with that name or code already exists." }, { status: 409 });
+    }
+    throw e;
+  }
 }

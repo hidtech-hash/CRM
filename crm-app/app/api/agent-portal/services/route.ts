@@ -17,6 +17,7 @@ export async function GET() {
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!isAgentRole(role)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
-  const services = await listActiveServices();
+  // The walk-in customer price is not for agents' eyes.
+  const services = (await listActiveServices()).map(({ customerPrice: _hidden, ...rest }) => rest);
   return NextResponse.json({ services });
 }

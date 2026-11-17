@@ -4,6 +4,7 @@ import { authOptions, canManageServices } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getServiceWithConfig } from "@/lib/services";
 import { z } from "zod";
+import { prismaErrorResponse } from "@/lib/apiErrors";
 
 // GET /api/services/:id
 // Returns the service plus its full dynamic configuration — fields
@@ -47,10 +48,15 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
     return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   }
 
-  const service = await prisma.service.update({
-    where: { id: params.id },
-    data: parsed.data,
-  });
-
-  return NextResponse.json({ service });
+  try {
+    const service = await prisma.service.update({
+      where: { id: params.id },
+      data: parsed.data,
+    });
+    return NextResponse.json({ service });
+  } catch (e: any) {
+    const mapped = prismaErrorResponse(e);
+    if (mapped) return mapped;
+    throw e;
+  }
 }

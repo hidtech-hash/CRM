@@ -71,6 +71,44 @@ enum ServiceFieldType {
   CHECKBOX
 }
 
+enum WhatsAppConnectionStatus {
+  NOT_CONNECTED
+  CONNECTING
+  QR_REQUIRED
+  CONNECTED
+  DISCONNECTED
+  RECONNECTING
+  CONNECTION_ERROR
+}
+
+// Extensible on purpose — adding a new automated notification later
+// means adding one enum value + one seeded WhatsAppTemplate row, not
+// a new table or new send-logic.
+enum WhatsAppTemplateType {
+  CUSTOMER_CREATED
+  SERVICE_APPLIED
+  AGENT_PAYMENT_REMINDER
+  // Sent to the employee(s) who should review a new agent-submitted
+  // application. One shared template (WhatsAppTemplate row).
+  AGENT_APPLICATION_TO_EMPLOYEE
+  // Log-only type for customer status-change messages. The bodies live
+  // in WhatsAppStatusTemplate (one per ServiceStatus), not in
+  // WhatsAppTemplate, so adding a status never needs a new enum value.
+  APPLICATION_STATUS_CHANGED
+}
+
+enum WhatsAppMessageStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+enum WhatsAppRecipientType {
+  CUSTOMER
+  AGENT
+  EMPLOYEE
+}
+
 model User {
   id           String   @id @default(cuid())
   name         String
@@ -80,6 +118,25 @@ model User {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  // Profile details (Admin/Manager/Employee). `email` above remains the
+  // LOGIN ID (agents already store a non-email login id there); the
+  // optional contactEmail is a real mailbox. `mobile` is the number
+  // used for WhatsApp notifications to this employee.
+  mobile       String?  @unique
+  // Is `mobile` a WhatsApp number? Employee/staff WhatsApp notifications
+  // are only sent when this is true (same pattern as Customer's flags).
+  mobileIsWhatsapp Boolean @default(false)
+  // Auto-generated EMP-000001 style ID, Employees only. Allocated on the
+  // server from the Counter table inside the same transaction that
+  // creates the user; never accepted from the client.
+  employeeCode String?  @unique
+  dateOfJoining DateTime? @db.Date
+  contactEmail String?
+  address      String?
+  state        String?
+  district     String?
+  tehsil       String?
 
   customersCreated       Customer[]        @relation("CustomerCreatedBy")
   customersUpdated       Customer[]        @relation("CustomerUpdatedBy")
@@ -103,6 +160,10 @@ model User {
   // filled in or uploaded (agent at submission, or staff later).
   fieldValuesEntered ApplicationFieldValue[] @relation("FieldValueUpdatedBy")
   documentsUploaded  ApplicationDocument[]   @relation("DocumentUploadedBy")
+
+  whatsappTemplatesUpdated WhatsAppTemplate[] @relation("WhatsAppTemplateUpdatedBy")
+  whatsappStatusTemplatesUpdated WhatsAppStatusTemplate[] @relation("WhatsAppStatusTemplateUpdatedBy")
+  whatsappMessagesReceived WhatsAppMessage[] @relation("WhatsAppMessageEmployee")
 }
 
 // An agent refers customers/work to us. Agents don't have their own
@@ -146,6 +207,7 @@ model Agent {
 
   customerServices CustomerService[]
   paymentRequests  AgentPaymentRequest[]
+  whatsappMessages WhatsAppMessage[]
 
   @@index([name])
   @@index([mobile])
@@ -172,12 +234,20 @@ model Customer {
   createdBy   User     @relation("CustomerCreatedBy", fields: [createdById], references: [id])
   createdAt   DateTime @default(now())
 
+  // Which of this customer's numbers (if any) is a WhatsApp number —
+  // see lib/whatsapp/service.ts for the selection rule: primary
+  // first, then alternate, and if neither is marked, WhatsApp is
+  // simply never attempted for this customer.
+  mobileIsWhatsapp    Boolean @default(false)
+  altMobileIsWhatsapp Boolean @default(false)
+
   updatedById String?
   updatedBy   User?    @relation("CustomerUpdatedBy", fields: [updatedById], references: [id])
   updatedAt   DateTime @updatedAt
   deletedAt   DateTime? // soft delete
 
   services CustomerService[]
+  whatsappMessages WhatsAppMessage[]
 
   @@index([mobile])
   @@index([fullName])
@@ -310,7 +380,7 @@ model ApplicationDocument {
 // A customer can have many of these (many services over time).
 model CustomerService {
   id       String @id @default(cuid())
-  workCode String @unique // WRK-000001
+  workCode String @unique // SID-000001 (older rows may still read WRK-000001 — see lib/codes.ts)
 
   customerId String
   customer   Customer @relation(fields: [customerId], references: [id])
@@ -370,6 +440,7 @@ model CustomerService {
 
   fieldValues ApplicationFieldValue[]
   documents   ApplicationDocument[]
+  whatsappMessages WhatsAppMessage[]
 
   @@index([customerId])
   @@index([status])
@@ -442,4 +513,106 @@ model ActivityLog {
   createdAt  DateTime @default(now())
 
   @@index([entityType, entityId])
+}
+
+// A single mutable row describing the ONE shared Baileys/WhatsApp
+// connection for the whole CRM — never one per user. The actual
+// Baileys auth/session credentials are NOT stored here (or anywhere
+// in the database): they live on server disk under the folder
+// lib/whatsapp/baileysClient.ts points at, so they're never exposed
+// through any API response. This row is just status metadata the UI
+// polls — connection state, which number is connected, timestamps.
+model WhatsAppConfig {
+  id               String                    @id @default(cuid())
+  status           WhatsAppConnectionStatus  @default(NOT_CONNECTED)
+  connectedNumber  String?
+  lastConnectedAt  DateTime?
+  lastDisconnectedAt DateTime?
+  lastError        String?
+  updatedAt        DateTime @updatedAt
+}
+
+// ONE row per template type — shared globally across the whole CRM,
+// never per-agent or per-customer. See lib/whatsapp/service.ts for
+// how {VARIABLES} in `body` get replaced per-recipient at send time;
+// nothing here is ever agent- or customer-specific.
+model WhatsAppTemplate {
+  id   String               @id @default(cuid())
+  type WhatsAppTemplateType @unique
+  body String               @db.Text
+
+  updatedById String
+  updatedBy   User     @relation("WhatsAppTemplateUpdatedBy", fields: [updatedById], references: [id])
+  updatedAt   DateTime @updatedAt
+}
+
+// One row per outgoing (or attempted) WhatsApp message. This is both
+// the send log AND the failed-message/retry audit trail — a retry
+// creates a NEW row linked back via retryOfId rather than mutating
+// the original, so the full history (attempt 1 failed, attempt 2
+// failed, attempt 3 sent) is always intact, per the "preserve failed
+// message history" requirement.
+model WhatsAppMessage {
+  id             String                 @id @default(cuid())
+  templateType   WhatsAppTemplateType
+  recipientType  WhatsAppRecipientType
+  toNumber       String                 // normalized number actually dialed
+  body           String                 @db.Text // the final, personalized text sent
+
+  status         WhatsAppMessageStatus  @default(QUEUED)
+  failureReason  String?
+  attemptNumber  Int                    @default(1)
+  retryOfId      String?
+  retryOf        WhatsAppMessage?       @relation("MessageRetries", fields: [retryOfId], references: [id])
+  retries        WhatsAppMessage[]      @relation("MessageRetries")
+
+  customerId         String?
+  customer           Customer?        @relation(fields: [customerId], references: [id])
+  agentId            String?
+  agent              Agent?           @relation(fields: [agentId], references: [id])
+  customerServiceId  String?
+  customerService    CustomerService? @relation(fields: [customerServiceId], references: [id])
+
+  // Employee recipient (AGENT_APPLICATION_TO_EMPLOYEE notifications).
+  employeeId         String?
+  employee           User?            @relation("WhatsAppMessageEmployee", fields: [employeeId], references: [id])
+
+  // Idempotency key: when set, only ONE message with this key can ever
+  // exist (enforced by the database), so double requests / retries of
+  // the same event can never send the same notification twice. Manual
+  // retries (retryOfId) deliberately do not copy it.
+  dedupeKey          String?          @unique
+
+  createdAt DateTime  @default(now())
+  sentAt    DateTime?
+
+  @@index([status])
+  @@index([templateType, agentId, createdAt])
+  @@index([customerId])
+  @@index([employeeId])
+}
+
+// One shared, editable template per application status — the "status
+// changed" customer notification. Adding a notification for another
+// status means adding a row (or just using the built-in default in
+// lib/whatsapp/defaultTemplates.ts), never new code paths.
+model WhatsAppStatusTemplate {
+  id        String        @id @default(cuid())
+  status    ServiceStatus @unique
+  body      String        @db.Text
+  isEnabled Boolean       @default(true)
+
+  updatedById String
+  updatedBy   User     @relation("WhatsAppStatusTemplateUpdatedBy", fields: [updatedById], references: [id])
+  updatedAt   DateTime @updatedAt
+}
+
+// Generic atomic counters for human-readable IDs. A row is incremented
+// with a single INSERT ... ON CONFLICT DO UPDATE ... RETURNING statement
+// (row-locked by PostgreSQL), so concurrent requests can never receive
+// the same number. Used for EMP- codes; usable for other prefixes later.
+model Counter {
+  key       String   @id
+  value     Int      @default(0)
+  updatedAt DateTime @updatedAt
 }

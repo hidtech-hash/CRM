@@ -24,6 +24,9 @@ export default function Nav() {
         <Link href="/services" className="text-sm hover:text-slate-300">
           Services
         </Link>
+        <Link href="/settings/whatsapp" className="text-sm hover:text-slate-300">
+          WhatsApp
+        </Link>
         {isAdminOrManager && (
           <>
             <Link href="/payment-requests" className="text-sm hover:text-slate-300">
@@ -31,6 +34,9 @@ export default function Nav() {
             </Link>
             <Link href="/settings/upi" className="text-sm hover:text-slate-300">
               UPI Settings
+            </Link>
+            <Link href="/users" className="text-sm hover:text-slate-300">
+              Users
             </Link>
           </>
         )}

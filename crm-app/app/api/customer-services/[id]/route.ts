@@ -9,6 +9,7 @@ import {
 import { prisma } from "@/lib/prisma";
 import { logActivity } from "@/lib/activityLog";
 import { EXCLUDED_FROM_BALANCE } from "@/lib/agentContext";
+import { notifyCustomerOfStatusChange } from "@/lib/whatsapp/notifications";
 import { z } from "zod";
 import { ServiceStatus, PaymentStatus } from "@prisma/client";
 
@@ -21,8 +22,8 @@ const updateSchema = z.object({
   agentId: z.string().nullable().optional(),
   assignedEmployeeId: z.string().nullable().optional(),
   // Price and payment figures — admin/manager only (see below).
-  amount: z.number().optional(),
-  amountReceived: z.number().optional(),
+  amount: z.number().min(0).finite().optional(),
+  amountReceived: z.number().min(0).finite().optional(),
   paymentStatus: z.nativeEnum(PaymentStatus).optional(),
 });
 
@@ -61,7 +62,20 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     include: { user: { select: { name: true } } },
   });
 
-  return NextResponse.json({ application, activity });
+  // Field visibility is enforced HERE, on the server — not just by the
+  // UI hiding things. A field (and any value already stored for it)
+  // that isn't visible to this role never leaves the API.
+  const role = (session.user as any)?.role;
+  const visKey = role === "EMPLOYEE" ? "visibleToEmployee" : "visibleToAdmin";
+  const visibleFields = application.service.fields.filter((f: any) => f[visKey]);
+  const visibleIds = new Set(visibleFields.map((f) => f.id));
+  const safe = {
+    ...application,
+    service: { ...application.service, fields: visibleFields },
+    fieldValues: application.fieldValues.filter((v) => visibleIds.has(v.serviceFieldId)),
+  };
+
+  return NextResponse.json({ application: safe, activity });
 }
 
 
@@ -125,6 +139,19 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
     return NextResponse.json({ error: "Forbidden: cannot reassign work" }, { status: 403 });
   }
 
+  if (data.agentId) {
+    const agentRow = await prisma.agent.findUnique({ where: { id: data.agentId }, select: { deletedAt: true } });
+    if (!agentRow || agentRow.deletedAt) {
+      return NextResponse.json({ error: "Agent not found" }, { status: 404 });
+    }
+  }
+  if (effectiveAssignedEmployeeId) {
+    const emp = await prisma.user.findUnique({ where: { id: effectiveAssignedEmployeeId }, select: { isActive: true, role: true } });
+    if (!emp || !emp.isActive || emp.role === "AGENT") {
+      return NextResponse.json({ error: "Assigned employee not found" }, { status: 404 });
+    }
+  }
+
   const isTouchingMoney =
     data.amount !== undefined || data.amountReceived !== undefined || data.paymentStatus !== undefined;
   if (isTouchingMoney && !canManagePayments(role)) {
@@ -149,24 +176,56 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
     !EXCLUDED_FROM_BALANCE.includes(data.status as any) &&
     !existing.acceptedAt;
 
-  const updated = await prisma.customerService.update({
-    where: { id: params.id },
-    data: {
-      status: data.status ?? undefined,
-      referenceNumber: data.referenceNumber ?? undefined,
-      rejectionReason: data.status === "REJECTED" ? data.rejectionReason ?? existing.rejectionReason : clearingRejectionReason ? null : undefined,
-      notes: data.notes ?? undefined,
-      completedDate: data.completedDate ? new Date(data.completedDate) : undefined,
-      agentId: data.agentId,
-      assignedEmployeeId: effectiveAssignedEmployeeId,
-      acceptedAt: becomingBalanceEligible ? new Date() : undefined,
-      amount: data.amount ?? undefined,
-      amountReceived: data.amountReceived ?? undefined,
-      paymentStatus: data.paymentStatus ?? undefined,
-      updatedById: userId,
-    },
-    include: { service: true, agent: true },
-  });
+  const statusChanging = data.status !== undefined && data.status !== existing.status;
+
+  const updateData = {
+    status: data.status ?? undefined,
+    referenceNumber: data.referenceNumber ?? undefined,
+    rejectionReason: data.status === "REJECTED" ? data.rejectionReason ?? existing.rejectionReason : clearingRejectionReason ? null : undefined,
+    notes: data.notes ?? undefined,
+    // Completing an application stamps the completion date on the
+    // server if nobody supplied one (previously only the browser did).
+    completedDate: data.completedDate
+      ? new Date(data.completedDate)
+      : data.status === "COMPLETED" && !existing.completedDate
+      ? new Date()
+      : undefined,
+    agentId: data.agentId,
+    assignedEmployeeId: effectiveAssignedEmployeeId,
+    acceptedAt: becomingBalanceEligible ? new Date() : undefined,
+    amount: data.amount ?? undefined,
+    amountReceived: data.amountReceived ?? undefined,
+    paymentStatus: data.paymentStatus ?? undefined,
+    updatedById: userId,
+  };
+
+  let updated;
+  if (statusChanging) {
+    // Compare-and-set on the status we read: if a double request or
+    // another user already moved this application, exactly ONE caller
+    // wins and the other gets a 409 — so a transition (and its
+    // customer notification) can only ever be applied once.
+    const claimed = await prisma.customerService.updateMany({
+      where: { id: params.id, status: existing.status },
+      data: updateData as any,
+    });
+    if (claimed.count === 0) {
+      return NextResponse.json(
+        { error: "This application's status was just changed by someone else. Reload and try again." },
+        { status: 409 }
+      );
+    }
+    updated = await prisma.customerService.findUniqueOrThrow({
+      where: { id: params.id },
+      include: { service: true, agent: true },
+    });
+  } else {
+    updated = await prisma.customerService.update({
+      where: { id: params.id },
+      data: updateData as any,
+      include: { service: true, agent: true },
+    });
+  }
 
   // Log a status change specifically, since that's the most
   // important transition to see in the customer's history.
@@ -234,6 +293,19 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
       previousValue: { paymentStatus: existing.paymentStatus, amountReceived: existing.amountReceived },
       newValue: { paymentStatus: updated.paymentStatus, amountReceived: updated.amountReceived },
     });
+  }
+
+  // Customer notification ONLY when the status actually changed (never
+  // on a save that leaves the status as is). Fire-and-forget: a WhatsApp
+  // failure is logged for the Failed Messages screen and never affects
+  // this response or the status change itself.
+  if (statusChanging) {
+    notifyCustomerOfStatusChange({
+      applicationId: updated.id,
+      fromStatus: existing.status,
+      toStatus: updated.status,
+      transitionStamp: existing.updatedAt.getTime(),
+    }).catch((e) => console.error("[WhatsApp] Unexpected error in status notification:", e?.message));
   }
 
   return NextResponse.json({ customerService: updated });

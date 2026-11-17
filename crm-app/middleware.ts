@@ -14,6 +14,17 @@ export default withAuth(
     const role = token?.role;
     const path = req.nextUrl.pathname;
 
+    // Uploaded files (application documents, payment screenshots) are no
+    // longer public static files: every /uploads/* request must carry a
+    // session and is served through /api/files, which checks WHO may see
+    // WHICH file (an agent only their own).
+    if (path.startsWith("/uploads/")) {
+      const rest = path.slice("/uploads/".length);
+      const url = req.nextUrl.clone();
+      url.pathname = `/api/files/${rest}`;
+      return NextResponse.rewrite(url);
+    }
+
     if (role === "AGENT") {
       const allowed = AGENT_ALLOWED_PREFIXES.some((p) => path.startsWith(p));
       if (!allowed) {
@@ -38,8 +49,8 @@ export const config = {
      * - /login
      * - /api/auth/* (NextAuth internals)
      * - static assets
-     * - uploaded payment screenshots (served as static files)
+     * (/uploads is NOT excluded any more — it requires a session.)
      */
-    "/((?!login|api/auth|_next/static|_next/image|favicon.ico|uploads).*)",
+    "/((?!login|api/auth|_next/static|_next/image|favicon.ico).*)",
   ],
 };

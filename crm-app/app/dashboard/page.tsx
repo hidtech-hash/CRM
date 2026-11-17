@@ -59,7 +59,7 @@ export default function DashboardPage() {
                 <table className="w-full text-sm">
                   <thead className="bg-slate-100 text-left">
                     <tr>
-                      <th className="px-4 py-2">Work ID</th>
+                      <th className="px-4 py-2">Service ID</th>
                       <th className="px-4 py-2">Customer</th>
                       <th className="px-4 py-2">Service</th>
                       <th className="px-4 py-2">Agent</th>
@@ -98,7 +98,7 @@ export default function DashboardPage() {
                 <table className="w-full text-sm">
                   <thead className="bg-slate-100 text-left">
                     <tr>
-                      <th className="px-4 py-2">Work ID</th>
+                      <th className="px-4 py-2">Service ID</th>
                       <th className="px-4 py-2">Customer</th>
                       <th className="px-4 py-2">Service</th>
                       <th className="px-4 py-2">Agent</th>
@@ -140,7 +140,7 @@ export default function DashboardPage() {
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-left">
                   <tr>
-                    <th className="px-4 py-2">Work ID</th>
+                    <th className="px-4 py-2">Service ID</th>
                     <th className="px-4 py-2">Customer</th>
                     <th className="px-4 py-2">Service</th>
                     <th className="px-4 py-2">Status</th>
@@ -192,7 +192,7 @@ export default function DashboardPage() {
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-left">
                   <tr>
-                    <th className="px-4 py-2">Work ID</th>
+                    <th className="px-4 py-2">Service ID</th>
                     <th className="px-4 py-2">Customer</th>
                     <th className="px-4 py-2">Service</th>
                     <th className="px-4 py-2">Status</th>

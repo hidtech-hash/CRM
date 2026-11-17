@@ -16,5 +16,8 @@ export async function GET(_req: Request, { params }: { params: { id: string } })
   const service = await getServiceWithConfig(params.id);
   if (!service || !service.isActive) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  return NextResponse.json({ service });
+  // Agents only get the fields they're allowed to see (the apply form
+  // renders from this), and never the walk-in customer price.
+  const { customerPrice: _hidden, ...rest } = service;
+  return NextResponse.json({ service: { ...rest, fields: service.fields.filter((f) => f.visibleToAgent) } });
 }

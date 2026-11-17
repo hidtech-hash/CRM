@@ -3,7 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions, canCreateCustomer } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logActivity } from "@/lib/activityLog";
-import { z } from "zod";
+import { customerUpdateSchema, customerDataForUpdate } from "@/lib/validation/customer";
 
 // GET /api/customers/:id
 // Returns the customer profile with every service they've
@@ -43,22 +43,6 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   return NextResponse.json({ customer, activity });
 }
 
-const updateSchema = z.object({
-  fullName: z.string().min(2).optional(),
-  mobile: z.string().min(10).max(15).optional(),
-  altMobile: z.string().optional(),
-  email: z.string().email().optional().or(z.literal("")),
-  address: z.string().optional(),
-  village: z.string().optional(),
-  tehsil: z.string().optional(),
-  district: z.string().optional(),
-  state: z.string().optional(),
-  pincode: z.string().optional(),
-  dob: z.string().optional(),
-  gender: z.string().optional(),
-  notes: z.string().optional(),
-});
-
 // PUT /api/customers/:id
 // Edit an existing customer's info in place — never creates a new
 // record. All existing applications keep referencing this same
@@ -76,28 +60,13 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
   }
 
   const body = await req.json();
-  const parsed = updateSchema.safeParse(body);
+  const parsed = customerUpdateSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
   const data = parsed.data;
 
   const customer = await prisma.customer.update({
     where: { id: params.id },
-    data: {
-      fullName: data.fullName,
-      mobile: data.mobile,
-      altMobile: data.altMobile,
-      email: data.email,
-      address: data.address,
-      village: data.village,
-      tehsil: data.tehsil,
-      district: data.district,
-      state: data.state,
-      pincode: data.pincode,
-      dob: data.dob ? new Date(data.dob) : undefined,
-      gender: data.gender,
-      notes: data.notes,
-      updatedById: userId,
-    },
+    data: { ...(customerDataForUpdate(data) as any), updatedById: userId },
   });
 
   await logActivity({

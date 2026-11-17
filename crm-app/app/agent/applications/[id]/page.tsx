@@ -74,9 +74,8 @@ export default function AgentApplicationDetailPage({ params }: { params: { id: s
       <AgentNav />
       <main className="max-w-2xl mx-auto p-8 space-y-6">
         <div>
-          <h1 className="text-2xl font-semibold">
-            {application.service.name} <span className="text-slate-400 font-normal text-lg">· {application.workCode}</span>
-          </h1>
+          <h1 className="text-2xl font-semibold">{application.service.name}</h1>
+          <p className="text-slate-500 text-sm mt-1">Service ID: {application.workCode}</p>
           <p className="text-slate-500 text-sm">{application.customer.fullName}</p>
           <span className={`inline-block mt-2 text-xs px-2 py-1 rounded ${STATUS_COLORS[application.status] ?? "bg-slate-100"}`}>
             {application.status.replace(/_/g, " ")}

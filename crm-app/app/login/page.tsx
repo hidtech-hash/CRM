@@ -32,10 +32,12 @@ export default function LoginPage() {
       <form onSubmit={handleSubmit} className="w-full max-w-sm bg-white p-8 rounded-lg shadow border">
         <h1 className="text-xl font-semibold mb-6">CRM Login</h1>
         {error && <p className="text-red-600 text-sm mb-4">{error}</p>}
-        <label className="block text-sm mb-1">Email</label>
+        <label className="block text-sm mb-1">Login ID or Email</label>
         <input
           className="w-full border rounded px-3 py-2 mb-4"
-          type="email"
+          type="text"
+          autoComplete="username"
+          autoCapitalize="none"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           required

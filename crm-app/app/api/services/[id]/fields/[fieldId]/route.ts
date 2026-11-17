@@ -24,6 +24,10 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string; 
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!canManageServices(role)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 
+  // The field must belong to THIS service (the URL used to be trusted blindly).
+  const owned = await prisma.serviceField.findFirst({ where: { id: params.fieldId, serviceId: params.id }, select: { id: true } });
+  if (!owned) return NextResponse.json({ error: "Not found" }, { status: 404 });
+
   const body = await req.json();
   const parsed = updateSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
@@ -44,6 +48,10 @@ export async function DELETE(_req: NextRequest, { params }: { params: { id: stri
   const role = (session?.user as any)?.role;
   if (!session) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   if (!canManageServices(role)) return NextResponse.json({ error: "Forbidden" }, { status: 403 });
+
+  // The field must belong to THIS service (the URL used to be trusted blindly).
+  const owned = await prisma.serviceField.findFirst({ where: { id: params.fieldId, serviceId: params.id }, select: { id: true } });
+  if (!owned) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   await prisma.serviceField.update({ where: { id: params.fieldId }, data: { isActive: false } });
   return NextResponse.json({ success: true });

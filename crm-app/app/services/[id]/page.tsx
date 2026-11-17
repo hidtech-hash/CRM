@@ -55,8 +55,9 @@ export default function ServiceConfigPage({ params }: { params: { id: string } }
             <div>
               <h2 className="font-semibold">Application Fields</h2>
               <p className="text-xs text-slate-500 mt-1">
-                These render automatically on the Agent's Apply for Service form and the staff review
-                screen — no code changes needed to add a new field.
+                These render automatically wherever this service is applied for — by an Agent or
+                directly by staff — and on the review/edit screen. No code changes needed to add a
+                new field.
               </p>
             </div>
             <button
@@ -95,6 +96,9 @@ export default function ServiceConfigPage({ params }: { params: { id: string } }
                       Optional / can be added later
                     </span>
                   )}
+                  <span className="ml-2 text-xs text-slate-400">
+                    {f.visibleToAgent && f.visibleToEmployee ? "Agent + Non-Agent" : f.visibleToAgent ? "Agent only" : "Non-Agent only"}
+                  </span>
                 </div>
                 <button onClick={() => deleteField(f.id)} className="text-red-600 text-xs hover:underline">
                   Remove
@@ -166,6 +170,8 @@ function AddFieldForm({ serviceId, onDone, onCancel }: { serviceId: string; onDo
   const [fieldType, setFieldType] = useState("TEXT");
   const [options, setOptions] = useState("");
   const [requiredAtSubmission, setRequiredAtSubmission] = useState(false);
+  const [visibleToAgent, setVisibleToAgent] = useState(true);
+  const [visibleToNonAgent, setVisibleToNonAgent] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -181,6 +187,13 @@ function AddFieldForm({ serviceId, onDone, onCancel }: { serviceId: string; onDo
         fieldType,
         options: fieldType === "SELECT" ? options.split(",").map((o) => o.trim()).filter(Boolean) : undefined,
         requiredAtSubmission,
+        visibleToAgent,
+        // "Non-Agent" covers both Employee and Admin/Manager applying
+        // directly — one checkbox toggling both underlying flags,
+        // since the request is Agent-vs-everyone-else, not
+        // Employee-vs-Admin.
+        visibleToEmployee: visibleToNonAgent,
+        visibleToAdmin: visibleToNonAgent,
       }),
     });
     setSaving(false);
@@ -240,8 +253,22 @@ function AddFieldForm({ serviceId, onDone, onCancel }: { serviceId: string; onDo
           checked={requiredAtSubmission}
           onChange={(e) => setRequiredAtSubmission(e.target.checked)}
         />
-        Required when the Agent submits (leave unchecked for info that can be added later)
+        Required when applying (leave unchecked for info that can be added later)
       </label>
+      <div className="flex items-center gap-6 pt-1">
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={visibleToAgent} onChange={(e) => setVisibleToAgent(e.target.checked)} />
+          Show for Agent
+        </label>
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={visibleToNonAgent}
+            onChange={(e) => setVisibleToNonAgent(e.target.checked)}
+          />
+          Show for Non-Agent Users
+        </label>
+      </div>
       <div className="flex gap-3">
         <button
           onClick={submit}

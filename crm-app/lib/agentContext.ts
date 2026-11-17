@@ -1,4 +1,10 @@
 import { prisma } from "./prisma";
+import type { Prisma } from "@prisma/client";
+
+// Money is stored as Decimal(10,2) but summed as JS numbers; round every
+// result to 2 decimals so float noise (0.1 + 0.2) never leaks into
+// balances, payment statuses or allocations.
+export const roundMoney = (n: number) => Math.round((n + Number.EPSILON) * 100) / 100;
 
 // Application statuses that must NOT count toward an agent's
 // pending balance. This is the entire implementation of "payment
@@ -18,8 +24,11 @@ export const EXCLUDED_FROM_BALANCE = ["PENDING_REVIEW", "REJECTED", "CANCELLED"]
 export async function getAgentForUser(userId: string) {
   const agent = await prisma.agent.findUnique({
     where: { userId },
+    include: { user: { select: { isActive: true } } },
   });
-  if (!agent || agent.deletedAt) return null;
+  // Inactive / deleted agents, and agents whose login is disabled, get
+  // no agent context — so even a still-valid session can't act as them.
+  if (!agent || agent.deletedAt || agent.status !== "ACTIVE" || !agent.user?.isActive) return null;
   return agent;
 }
 
@@ -40,7 +49,9 @@ export async function getAgentBalance(agentId: string) {
     total += Number(cs.amount ?? 0);
     received += Number(cs.amountReceived ?? 0);
   }
-  return { total, received, pending: Math.max(0, total - received) };
+  total = roundMoney(total);
+  received = roundMoney(received);
+  return { total, received, pending: roundMoney(Math.max(0, total - received)) };
 }
 
 // Applies a verified agent payment across that agent's outstanding
@@ -53,8 +64,14 @@ export async function getAgentBalance(agentId: string) {
 // changed. PENDING_REVIEW/REJECTED/CANCELLED applications are never
 // touched by an allocation, consistent with them not counting toward
 // the balance in the first place.
-export async function allocatePaymentToAgentWork(agentId: string, verifiedAmount: number) {
-  const items = await prisma.customerService.findMany({
+export async function allocatePaymentToAgentWork(
+  agentId: string,
+  verifiedAmount: number,
+  // Pass the transaction client so the allocation commits or rolls back
+  // together with the approval that triggered it.
+  db: Prisma.TransactionClient | typeof prisma = prisma
+): Promise<{ allocated: number; unallocated: number }> {
+  const items = await db.customerService.findMany({
     where: {
       agentId,
       deletedAt: null,
@@ -64,19 +81,21 @@ export async function allocatePaymentToAgentWork(agentId: string, verifiedAmount
     orderBy: { appliedDate: "asc" },
   });
 
-  let remaining = verifiedAmount;
+  let remaining = roundMoney(verifiedAmount);
+  let allocated = 0;
   for (const cs of items) {
     if (remaining <= 0) break;
     const amount = Number(cs.amount ?? 0);
     const alreadyReceived = Number(cs.amountReceived ?? 0);
-    const owedOnThis = amount - alreadyReceived;
+    const owedOnThis = roundMoney(amount - alreadyReceived);
     if (owedOnThis <= 0) continue;
 
     const toApply = Math.min(owedOnThis, remaining);
-    const newReceived = alreadyReceived + toApply;
-    remaining -= toApply;
+    const newReceived = roundMoney(alreadyReceived + toApply);
+    remaining = roundMoney(remaining - toApply);
+    allocated = roundMoney(allocated + toApply);
 
-    await prisma.customerService.update({
+    await db.customerService.update({
       where: { id: cs.id },
       data: {
         amountReceived: newReceived,
@@ -85,9 +104,11 @@ export async function allocatePaymentToAgentWork(agentId: string, verifiedAmount
     });
   }
   // Any leftover `remaining` (agent overpaid beyond all current dues)
-  // is intentionally not applied anywhere — it simply shows as the
-  // agent having ₹0 pending until new work is accepted. Nothing is
-  // lost: it's still visible in the AgentPaymentRequest audit trail.
+  // is intentionally not applied anywhere — it shows as ₹0 pending until
+  // new work is accepted, and is reported back as `unallocated` so the
+  // approval can record it in the activity log. Nothing is lost: it is
+  // still visible in the AgentPaymentRequest audit trail.
+  return { allocated, unallocated: remaining };
 }
 
 // The oldest `acceptedAt` among an agent's currently-outstanding
@@ -126,8 +147,8 @@ export async function getAllAgentsBalances() {
   for (const it of items) {
     const key = it.agentId as string;
     if (!byAgent[key]) byAgent[key] = { total: 0, received: 0, oldestUnpaidAcceptedAt: null };
-    byAgent[key].total += Number(it.amount ?? 0);
-    byAgent[key].received += Number(it.amountReceived ?? 0);
+    byAgent[key].total = roundMoney(byAgent[key].total + Number(it.amount ?? 0));
+    byAgent[key].received = roundMoney(byAgent[key].received + Number(it.amountReceived ?? 0));
     if (it.paymentStatus !== "PAID" && it.acceptedAt) {
       const current = byAgent[key].oldestUnpaidAcceptedAt;
       if (!current || it.acceptedAt < current) byAgent[key].oldestUnpaidAcceptedAt = it.acceptedAt;

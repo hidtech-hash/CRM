@@ -4,6 +4,7 @@ import { authOptions, isAgentRole } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { getAgentForUser } from "@/lib/agentContext";
 import { logActivity } from "@/lib/activityLog";
+import { notifyCustomerOfStatusChange } from "@/lib/whatsapp/notifications";
 
 // PUT /api/agent-portal/applications/:id/cancel
 // The Agent gives up on a REJECTED application instead of
@@ -27,10 +28,15 @@ export async function PUT(_req: Request, { params }: { params: { id: string } })
     return NextResponse.json({ error: "Only a rejected application can be cancelled" }, { status: 409 });
   }
 
-  const updated = await prisma.customerService.update({
-    where: { id: application.id },
+  // Compare-and-set so a double click cancels (and notifies) once.
+  const claimed = await prisma.customerService.updateMany({
+    where: { id: application.id, status: "REJECTED" },
     data: { status: "CANCELLED", updatedById: userId },
   });
+  if (claimed.count === 0) {
+    return NextResponse.json({ error: "This application was already changed." }, { status: 409 });
+  }
+  const updated = await prisma.customerService.findUniqueOrThrow({ where: { id: application.id } });
 
   await logActivity({
     userId,
@@ -40,6 +46,13 @@ export async function PUT(_req: Request, { params }: { params: { id: string } })
     previousValue: { status: "REJECTED" },
     newValue: { status: "CANCELLED" },
   });
+
+  notifyCustomerOfStatusChange({
+    applicationId: application.id,
+    fromStatus: "REJECTED",
+    toStatus: "CANCELLED",
+    transitionStamp: application.updatedAt.getTime(),
+  }).catch((e) => console.error("[WhatsApp] Unexpected error in status notification:", e?.message));
 
   return NextResponse.json({ application: updated });
 }

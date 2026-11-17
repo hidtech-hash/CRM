@@ -36,7 +36,10 @@ export async function PUT(req: NextRequest, { params }: { params: { id: string }
   const parsed = updateSchema.safeParse(body);
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
 
-  const editableFields = application.service.fields.filter((f) => f.editableAfterSubmission);
+  // Editable AND visible to this role — a field hidden from you can't be
+  // written through this endpoint either.
+  const visKey = role === "EMPLOYEE" ? "visibleToEmployee" : "visibleToAdmin";
+  const editableFields = application.service.fields.filter((f: any) => f.editableAfterSubmission && f[visKey]);
   const editableIds = new Set(editableFields.map((f) => f.id));
 
   let updatedCount = 0;

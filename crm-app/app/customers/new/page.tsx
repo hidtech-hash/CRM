@@ -3,21 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Nav from "@/components/Nav";
-
-const REST_OF_FIELDS: Array<{ name: string; label: string; type?: string; required?: boolean }> = [
-  { name: "fullName", label: "Full Name", required: true },
-  { name: "altMobile", label: "Alternate Mobile" },
-  { name: "email", label: "Email", type: "email" },
-  { name: "address", label: "Address" },
-  { name: "village", label: "Village" },
-  { name: "tehsil", label: "Tehsil" },
-  { name: "district", label: "District" },
-  { name: "state", label: "State" },
-  { name: "pincode", label: "PIN Code" },
-  { name: "dob", label: "Date of Birth", type: "date" },
-  { name: "gender", label: "Gender" },
-  { name: "notes", label: "Notes" },
-];
+import CustomerFormFields, { CustomerFormValue, emptyCustomerForm, customerFormToPayload } from "@/components/CustomerFormFields";
 
 export default function NewCustomerPage() {
   const router = useRouter();
@@ -25,7 +11,7 @@ export default function NewCustomerPage() {
   const [checking, setChecking] = useState(false);
   const [foundCustomer, setFoundCustomer] = useState<any>(null);
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState<Record<string, string>>({});
+  const [form, setForm] = useState<CustomerFormValue>(emptyCustomerForm());
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -40,6 +26,7 @@ export default function NewCustomerPage() {
     if (data.customer) {
       setFoundCustomer(data.customer);
     } else {
+      setForm(emptyCustomerForm(mobile.trim()));
       setShowForm(true);
     }
   }
@@ -47,11 +34,10 @@ export default function NewCustomerPage() {
   async function submit() {
     setLoading(true);
     setError("");
-    const dob = form.dob ? new Date(form.dob).toISOString() : undefined;
     const res = await fetch("/api/customers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...form, mobile, dob }),
+      body: JSON.stringify(customerFormToPayload(form, { includeNotes: true })),
     });
     setLoading(false);
     if (res.status === 409) {
@@ -63,7 +49,9 @@ export default function NewCustomerPage() {
       return;
     }
     if (!res.ok) {
-      setError("Could not create customer. Check the required fields.");
+      const d = await res.json().catch(() => ({}));
+      const fieldErrors = d?.error?.fieldErrors ? Object.values(d.error.fieldErrors).flat().filter(Boolean) : [];
+      setError(fieldErrors.length ? (fieldErrors as string[]).join(" · ") : "Could not create customer. Check the required fields.");
       return;
     }
     const data = await res.json();
@@ -134,28 +122,10 @@ export default function NewCustomerPage() {
                 e.preventDefault();
                 submit();
               }}
-              className="bg-white border rounded-lg p-6 grid grid-cols-2 gap-4"
+              className="bg-white border rounded-lg p-6 space-y-4"
             >
-              <div>
-                <label className="block text-sm mb-1">Mobile Number</label>
-                <input className="w-full border rounded px-3 py-2 text-sm bg-slate-100" value={mobile} disabled />
-              </div>
-              <div />
-              {REST_OF_FIELDS.map((f) => (
-                <div key={f.name} className={f.name === "notes" || f.name === "address" ? "col-span-2" : ""}>
-                  <label className="block text-sm mb-1">
-                    {f.label} {f.required && <span className="text-red-500">*</span>}
-                  </label>
-                  <input
-                    type={f.type ?? "text"}
-                    required={f.required}
-                    className="w-full border rounded px-3 py-2 text-sm"
-                    value={form[f.name] ?? ""}
-                    onChange={(e) => setForm({ ...form, [f.name]: e.target.value })}
-                  />
-                </div>
-              ))}
-              <div className="col-span-2 mt-2 flex items-center gap-4">
+              <CustomerFormFields value={form} onChange={setForm} lockMobile showNotes />
+              <div className="mt-2 flex items-center gap-4">
                 <button
                   type="submit"
                   disabled={loading}
@@ -168,7 +138,7 @@ export default function NewCustomerPage() {
                   onClick={() => {
                     setShowForm(false);
                     setMobile("");
-                    setForm({});
+                    setForm(emptyCustomerForm());
                   }}
                   className="text-slate-500 text-sm"
                 >

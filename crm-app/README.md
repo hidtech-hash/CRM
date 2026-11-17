@@ -313,3 +313,96 @@ Unchanged — verified by re-reading `lib/agentContext.ts`'s `EXCLUDED_FROM_BALA
 ### 9–10. "Pay Through UPI App"
 
 Added next to the QR on the Agent Dashboard as a plain `<a href="upi://...">` link — the standard way to trigger an installed UPI app on mobile. Uses the same server-computed `uri` the QR is generated from (now also returned by `/api/agent-portal/qr`), so there's no separate path for an agent to influence the amount. On desktop it simply does nothing harmful if unsupported; a caption below explains to scan the QR instead. The CRM still never assumes a payment succeeded — the UTR + screenshot + manual verification flow is completely unchanged.
+
+---
+
+## Fix round 3 — dynamic field/document architecture gaps, Service ID rename
+
+The previous rounds fixed workflow *bugs* (wrong permission checks, a crashing search query). This round fixes an actual **architectural gap**: dynamic fields and documents were only ever wired into the Agent's own apply flow, and there was no single page that reliably showed an application's submitted information at every stage of its life.
+
+### 1. Field visibility was never actually configurable in the UI
+`ServiceField.visibleToAgent` / `.visibleToEmployee` / `.visibleToAdmin` have existed in the schema and API since Phase 5 — the Service Configuration form just never exposed checkboxes for them, so every field silently defaulted to "visible to everyone," and separately, the non-Agent apply flow never rendered dynamic fields *at all* (see #2), which is why it looked like fields were Agent-only. Fixed: `/services/:id` now has **Show for Agent** / **Show for Non-Agent Users** checkboxes (the latter sets both `visibleToEmployee` and `visibleToAdmin` together, since the ask was Agent-vs-everyone-else, not a 3-way split) — reusing the existing three flags, not a new mechanism.
+
+### 2. Dynamic fields/documents were missing entirely from the staff apply flow
+**Root cause:** `POST /api/customer-services` (used when Admin/Manager/Employee applies a service directly from a customer's profile) never accepted `fieldValues` or document uploads — only the separate `POST /api/agent-portal/applications` endpoint did. So a field configured on a service genuinely never appeared for a non-Agent application, because nothing was there to render or save it.
+
+**Fix:** rewrote the endpoint to accept multipart form data with the exact same shape the agent-portal endpoint already used (`fieldValues` JSON, `requirement_<id>` files, `common_<name>` files, custom docs) — same `Service`/`ServiceField`/`ServiceDocumentRequirement` models, same validation, same everything, just reachable from the staff apply form too. The customer profile's "Apply Service" form now renders whichever fields/documents are configured for the selected service, filtered to what the current role can see, exactly like the Agent's form does.
+
+### 3–7. Submitted information "disappearing" after acceptance
+**Root cause:** the customer profile page linked an application to two *different* places depending on status — `/applications/:id` (which showed fields/documents, but only while `PENDING_REVIEW`) for review, or an inline edit form (which showed neither) for everything afterward. Once an application moved to "Accepted" and beyond, staff landed on the inline form and the submitted fields/documents were simply never rendered there — not deleted, just never displayed on that surface.
+
+**Fix:** consolidated into one page. `/applications/:id` is now the single view/edit surface for an application at *every* stage — the customer profile always links there, for every status, and that page now also has the status/reference-number/agent/assignment/price editing that used to live only in the removed inline form. Dynamic fields (filtered by role visibility, editable where `editableAfterSubmission` allows), documents (with a new upload/replace capability — added `POST /api/customer-services/:id/documents`, which never deletes an existing document, just adds another), and the full activity history are all on that one page regardless of status. There's exactly one `CustomerService` record throughout — nothing about this fix creates a second record or copies data anywhere; it only changes what's *displayed* and *where*.
+
+### 10–13. "Work ID" → "Service ID", format change
+- Every user-facing "Work ID" label now reads "Service ID".
+- New applications get a `SID-000001`-style code instead of `WRK-000001`. **Existing records are untouched** — the code is a plain stored string (`CustomerService.workCode`), not derived or regenerated, so old `WRK-xxxxxx` values stay exactly as they are; only the prefix used for values generated from now on changed. No migration needed for this change.
+- The internal Prisma field/column is still named `workCode` (an implementation detail, deliberately not renamed — renaming a column is a needless, riskier migration when only the *display* format needed to change, per the "prefer changing the display ID over the internal identifier" guidance).
+
+### Not a schema change this round
+Everything above reuses existing models (`ServiceField`, `ServiceDocumentRequirement`, `ApplicationFieldValue`, `ApplicationDocument`) — no new migration is required to apply this update, just pull in the files and restart.
+
+### Try it end-to-end
+1. As Admin: **Services → PAN Card → Configure Fields/Docs** — see the seeded "Agent Enrollment Code" field marked *Agent only*.
+2. As Admin/Manager/Employee: open a customer → **Apply Service** → pick PAN Card → the Aadhaar/Photo document fields appear (same as the Agent sees), but the Agent Enrollment Code field does **not** (it's Agent-only) — submit it.
+3. Open that application from the customer profile → **View / Edit** → confirm the submitted field and document are visible immediately.
+4. Accept it, then open it again from the customer profile — same page, same fields/documents still there, now with Reference Number / Status editable inline, right below the accept bar (which disappears once decided).
+
+---
+
+## Phase 6 — WhatsApp Messaging via Baileys
+
+### Known first-run fix (already applied)
+On Next.js 14.x, the "externalize Baileys from webpack bundling" config lives under `experimental.serverComponentsExternalPackages` — it only became a stable top-level `serverExternalPackages` key in Next.js 15. `next.config.js` now uses the correct 14.x key; if you'd already generated a build with the old key, restart `npm run dev` after pulling this fix (Next doesn't hot-reload `next.config.js` changes).
+
+### ⚠️ Important: not testable in the environment this was built in
+Everything below was written carefully against Baileys' well-established API (the `@whiskeysockets/baileys` package — the actively maintained fork; plain `baileys` on npm is outdated), but this was built in a sandboxed environment with **no network access**, so **none of the Baileys/WhatsApp connectivity has actually been run against a real WhatsApp account**. Expect to be the first to debug minor version-API mismatches when you `npm install` and actually try to connect — the architecture (singleton connection, session persistence, message service, scheduler) is sound and everything else in this codebase has been verified working, but the live WhatsApp handshake itself is unverified. If `connection.update` events, QR generation, or `sock.sendMessage`/`sock.onWhatsApp` don't match exactly what your installed Baileys version expects, check that package's own changelog/docs first — its API has shifted slightly across versions historically.
+
+### 1–6. One shared connection, shared templates
+- **`lib/whatsapp/baileysClient.ts`** is a singleton module — Node caches modules, so every API route in the same server process shares the same `sock` variable. This is what makes "one WhatsApp connection for the whole CRM" true, and it assumes the app runs as one long-lived Node process (`next start`/`next dev`), same assumption the local file upload storage already makes. It is **not** compatible with serverless/edge hosting without moving this to a separate always-on worker.
+- Session credentials persist via Baileys' own `useMultiFileAuthState` to a local `.baileys-auth/` folder (gitignored) — never written to the database, never returned by any API response. Only connection *status* (`WhatsAppConfig`) is exposed to the frontend.
+- `canManageWhatsApp` (`lib/auth.ts`) = Admin/Manager/Employee — enforced server-side on every `/api/whatsapp/*` route. Agents can't reach these routes at all (outside the `/api/agent-portal/*` middleware allowlist), and the permission check is there regardless as the real enforcement, not just a hidden nav link.
+- `WhatsAppTemplate` has exactly one row per notification type (`@unique` on `type`) — editing it edits the one shared template, there's no mechanism to create a second one.
+
+### 7–8. Customer Created / Service Applied
+Hooked into the three places a customer or application gets created (`POST /api/customers`, `POST /api/customer-services`, `POST /api/agent-portal/applications`) — all three call the same `sendWhatsAppMessage()` from `lib/whatsapp/service.ts`, fired without `await`-blocking the response (`.catch(() => {})`), so a slow or failed WhatsApp send never adds latency to or blocks the actual CRM operation.
+
+### 9–17. Agent Payment Reminder — one template, personalized dynamically, 7-day rule
+- **`lib/whatsapp/scheduler.ts`** runs daily via `node-cron`, registered exactly once at server boot through `instrumentation.ts` (Next's official "run code once when the server starts" hook).
+- Reuses `getAllAgentsBalances()` (`lib/agentContext.ts`) — the exact same balance calculation the Agents list and Agent Management summary already use. No second pending-amount calculation exists anywhere.
+- The 7-day threshold is computed from the real `acceptedAt` ledger timestamp (the same one added in an earlier round for the "Payment Pending From" column) — never a UI date.
+- Duplicate prevention queries the `WhatsAppMessage` log itself for a same-day `AGENT_PAYMENT_REMINDER` row for that agent, rather than a separate "reminders sent" tracker.
+- **`generateAgentPendingPaymentUPILink(agent)`** (added to the existing `lib/upi.ts`, not a new file) is the one place an agent's UPI link is built — both `/api/agent-portal/qr` (the Dashboard's QR + "Pay Through UPI App" button) and the reminder job call this exact function, so they can never disagree about the UPI ID, payee name, or amount.
+- UPI payment verification is completely unchanged — the reminder just links to the same manual UTR/screenshot/Manager-approval flow that already existed; nothing about clicking the link marks anything as paid.
+
+### 18–21. Customer WhatsApp number selection
+`Customer.mobileIsWhatsapp` / `.altMobileIsWhatsapp` — the exact Case 1/2/3 logic from the spec lives in one place, `resolveCustomerWhatsAppNumber()` in `lib/whatsapp/service.ts`. Both the Add Customer and Edit Customer forms expose the checkboxes; neither number is ever assumed to be WhatsApp-enabled by default.
+
+### 22–25. Failed messages, retry, history
+- Every send attempt (success or failure) writes a `WhatsAppMessage` row. A retry creates a **new** row linked back via `retryOfId` — the original is never mutated or deleted, so the full attempt history stays intact and visible on the WhatsApp Configuration → Failed Messages tab.
+- Failure reasons are distinguished using Baileys' own signals where possible: `sock.onWhatsApp()` is checked before sending to specifically flag "not registered on WhatsApp" (rather than lumping every failure into that one bucket), `isWhatsAppConnected()` catches the disconnected case, and anything else surfaces the actual error message from the send attempt.
+- The Failed Messages tab lets you edit the number inline and Resend without touching the Customer record itself.
+
+### 26–30. Centralized service, non-blocking, number normalization
+- `lib/whatsapp/service.ts` is the only place anything calls Baileys to send a message — `sendWhatsAppMessage()` never throws (always resolves to a result object), which is the entire mechanism behind "WhatsApp failures never block core CRM operations."
+- `lib/whatsapp/phone.ts` is the one number-normalization utility, assuming Indian 10-digit numbers by default (matching how this CRM already stores customer/agent mobiles) and building the WhatsApp JID consistently everywhere.
+
+### Setup
+
+```bash
+cd crm-app
+npm install          # pulls in @whiskeysockets/baileys, @hapi/boom, pino, node-cron
+npm run prisma:migrate      # new WhatsApp models + Customer.mobileIsWhatsapp/altMobileIsWhatsapp
+npm run dev
+```
+
+Re-seeds: a `NOT_CONNECTED` `WhatsAppConfig` row, the three default templates (exact bodies from the spec), and the seeded customer's primary mobile marked as a WhatsApp number so you can test end-to-end immediately once connected.
+
+### Connecting WhatsApp
+1. Log in as Admin/Manager/Employee → **WhatsApp** (nav) → **Connection** tab → **Connect**.
+2. A QR code should appear within a few seconds (polled automatically). Scan it from WhatsApp on your phone: Settings → Linked Devices → Link a Device.
+3. Status should flip to Connected with the linked number shown.
+4. Restart the dev server — the connection should restore automatically (via `instrumentation.ts` → `restoreWhatsAppConnectionIfConfigured`) without a new QR scan, since the session persisted to `.baileys-auth/`.
+
+### What's deliberately simplified per the spec's own guidance
+- Delivery/read receipt tracking — spec explicitly says not to make this mandatory; only Queued/Sent/Failed are tracked.
+- The reminder job runs on a fixed daily cron time (10:00 server time, in `lib/whatsapp/scheduler.ts`) rather than a configurable schedule — change the cron expression there if a different time suits better.

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import AgentNav from "@/components/AgentNav";
+import CustomerFormFields, { CustomerFormValue, emptyCustomerForm, customerFormToPayload } from "@/components/CustomerFormFields";
 
 const COMMON_DOCS = ["Aadhaar Card", "Photo", "Signature"];
 
@@ -14,7 +15,7 @@ export default function AgentApplyPage() {
   const [checking, setChecking] = useState(false);
   const [foundCustomer, setFoundCustomer] = useState<any>(null);
   const [notFound, setNotFound] = useState(false);
-  const [newCustomer, setNewCustomer] = useState<Record<string, string>>({});
+  const [newCustomer, setNewCustomer] = useState<CustomerFormValue>(emptyCustomerForm());
 
   // Service + dynamic config
   const [services, setServices] = useState<any[]>([]);
@@ -58,7 +59,7 @@ export default function AgentApplyPage() {
       setFoundCustomer(data.customer);
     } else {
       setNotFound(true);
-      setNewCustomer({ mobile });
+      setNewCustomer(emptyCustomerForm(mobile.trim()));
     }
   }
 
@@ -78,7 +79,7 @@ export default function AgentApplyPage() {
     }
 
     const missingFields = (serviceDetail.fields ?? [])
-      .filter((f: any) => f.requiredAtSubmission)
+      .filter((f: any) => f.requiredAtSubmission && f.visibleToAgent !== false)
       .filter((f: any) => !fieldValues[f.id]?.trim())
       .map((f: any) => f.label);
     if (missingFields.length > 0) {
@@ -99,7 +100,7 @@ export default function AgentApplyPage() {
     if (foundCustomer) {
       form.append("customerId", foundCustomer.id);
     } else {
-      form.append("newCustomer", JSON.stringify(newCustomer));
+      form.append("newCustomer", JSON.stringify(customerFormToPayload(newCustomer, { includeNotes: false })));
     }
     form.append("serviceId", serviceId);
     form.append("fieldValues", JSON.stringify(fieldValues));
@@ -178,48 +179,12 @@ export default function AgentApplyPage() {
           {notFound && (
             <div className="space-y-3">
               <p className="text-sm text-amber-700">No customer found for {mobile} — add their details:</p>
-              <div className="grid grid-cols-2 gap-3">
-                <input
-                  className="border rounded px-3 py-2 text-sm"
-                  placeholder="Full Name *"
-                  value={newCustomer.fullName ?? ""}
-                  onChange={(e) => setNewCustomer({ ...newCustomer, fullName: e.target.value })}
-                />
-                <input
-                  className="border rounded px-3 py-2 text-sm bg-slate-100"
-                  value={newCustomer.mobile ?? mobile}
-                  disabled
-                />
-                <input
-                  className="border rounded px-3 py-2 text-sm"
-                  placeholder="Email"
-                  value={newCustomer.email ?? ""}
-                  onChange={(e) => setNewCustomer({ ...newCustomer, email: e.target.value })}
-                />
-                <input
-                  className="border rounded px-3 py-2 text-sm"
-                  placeholder="District"
-                  value={newCustomer.district ?? ""}
-                  onChange={(e) => setNewCustomer({ ...newCustomer, district: e.target.value })}
-                />
-                <input
-                  className="border rounded px-3 py-2 text-sm"
-                  placeholder="State"
-                  value={newCustomer.state ?? ""}
-                  onChange={(e) => setNewCustomer({ ...newCustomer, state: e.target.value })}
-                />
-                <input
-                  className="border rounded px-3 py-2 text-sm"
-                  placeholder="PIN Code"
-                  value={newCustomer.pincode ?? ""}
-                  onChange={(e) => setNewCustomer({ ...newCustomer, pincode: e.target.value })}
-                />
-              </div>
+              <CustomerFormFields value={newCustomer} onChange={setNewCustomer} lockMobile showNotes={false} />
               <button
                 onClick={() => {
                   setNotFound(false);
                   setMobile("");
-                  setNewCustomer({});
+                  setNewCustomer(emptyCustomerForm());
                 }}
                 className="text-blue-600 text-xs hover:underline"
               >

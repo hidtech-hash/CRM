@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { authOptions, canManageAgents, canManageAgentUsers } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { logActivity } from "@/lib/activityLog";
+import { EXCLUDED_FROM_BALANCE, roundMoney } from "@/lib/agentContext";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 
@@ -42,24 +43,33 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
+  // Totals use the SAME rule as the agent's own dashboard, QR and
+  // reminders (lib/agentContext.ts): applications still awaiting review,
+  // rejected or cancelled don't count towards what the agent owes.
+  // Previously this profile summed every application, so it disagreed
+  // with the amount the agent was actually asked to pay.
   let totalBusiness = 0;
   let totalReceived = 0;
   const byStatus: Record<string, number> = {};
   const byService: Record<string, { count: number; total: number; pending: number }> = {};
 
   for (const cs of agent.customerServices) {
-    const amount = Number(cs.amount ?? 0);
-    const received = Number(cs.amountReceived ?? 0);
-    totalBusiness += amount;
-    totalReceived += received;
     byStatus[cs.status] = (byStatus[cs.status] ?? 0) + 1;
 
     const key = cs.service.name;
     if (!byService[key]) byService[key] = { count: 0, total: 0, pending: 0 };
     byService[key].count += 1;
-    byService[key].total += amount;
-    byService[key].pending += amount - received;
+
+    if ((EXCLUDED_FROM_BALANCE as readonly string[]).includes(cs.status)) continue;
+    const amount = Number(cs.amount ?? 0);
+    const received = Number(cs.amountReceived ?? 0);
+    totalBusiness += amount;
+    totalReceived += received;
+    byService[key].total = roundMoney(byService[key].total + amount);
+    byService[key].pending = roundMoney(byService[key].pending + (amount - received));
   }
+  totalBusiness = roundMoney(totalBusiness);
+  totalReceived = roundMoney(totalReceived);
 
   return NextResponse.json({
     agent,
@@ -67,7 +77,7 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
       totalReferred: agent.customerServices.length,
       totalBusiness,
       totalReceived,
-      totalPending: totalBusiness - totalReceived,
+      totalPending: roundMoney(Math.max(0, totalBusiness - totalReceived)),
       byStatus,
       byService,
     },

@@ -36,5 +36,16 @@ export async function GET(_req: NextRequest, { params }: { params: { id: string 
   });
 
   if (!application) return NextResponse.json({ error: "Not found" }, { status: 404 });
-  return NextResponse.json({ application });
+
+  // Only values of fields the agent is allowed to see, and never the
+  // walk-in customer price.
+  const visibleIds = new Set(application.service.fields.map((f) => f.id));
+  const { customerPrice: _hidden, ...serviceSafe } = application.service as any;
+  return NextResponse.json({
+    application: {
+      ...application,
+      service: serviceSafe,
+      fieldValues: application.fieldValues.filter((v) => visibleIds.has(v.serviceFieldId)),
+    },
+  });
 }
